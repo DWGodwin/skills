@@ -1,7 +1,6 @@
 ---
 description: Implement fix from RCA document for GitHub issue
 argument-hint: [github-issue-id]
-allowed-tools: Read, Write, Edit, Bash(eslint:*), Bash(tsc:*), Bash(jest:*), Bash(npm:*), Bash(bun:*)
 ---
 
 # Implement Fix: GitHub Issue #$ARGUMENTS
