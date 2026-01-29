@@ -101,7 +101,7 @@ Based on patterns across divergences, suggest:
 
 ## Output Format
 
-Save your analysis to: `.agent-module/system-reviews/[feature-name]-review.md`
+Save your analysis to: `.agents/system-reviews/[feature-name]-review.md`
 
 ### Report Structure:
 

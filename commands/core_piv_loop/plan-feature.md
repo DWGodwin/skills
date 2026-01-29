@@ -183,15 +183,14 @@ So that <benefit/value>
 
 <List files with line numbers and relevance>
 
-- `path/to/file.ts` (lines 15-45) - Why: Contains pattern for X that we'll mirror
-- `path/to/model.ts` (lines 100-120) - Why: Database model structure to follow
-- `path/to/test.ts` - Why: Test pattern example
+- `path/to/file.py` (lines 15-45) - Why: Contains pattern for X that we'll mirror
+- `path/to/model.py` (lines 100-120) - Why: Database model structure to follow
+- `path/to/test.py` - Why: Test pattern example
 
 ### New Files to Create
 
-- `path/to/newService.ts` - Service implementation for X functionality
-- `path/to/newModel.ts` - Data model for Y resource
-- `src/__tests__/services/testNewService.test.ts` - Unit tests for new service
+- `path/to/newService.py` - Service implementation for X functionality
+- `path/to/newModel.py` - Data model for Y resource
 
 ### Relevant Documentation YOU SHOULD READ THESE BEFORE IMPLEMENTING!
 
@@ -374,12 +373,12 @@ Execute every command to ensure zero regressions and 100% feature correctness.
 
 ## Output Format
 
-**Filename**: `.agent-module/plans/{kebab-case-descriptive-name}.md`
+**Filename**: `.agents/plans/{kebab-case-descriptive-name}.md`
 
 - Replace `{kebab-case-descriptive-name}` with short, descriptive feature name
 - Examples: `add-user-authentication.md`, `implement-search-api.md`, `refactor-database-layer.md`
 
-**Directory**: Create `.agent-module/plans/` if it doesn't exist
+**Directory**: Create `.agents/plans/` if it doesn't exist
 
 ## Quality Criteria
 

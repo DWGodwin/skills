@@ -82,7 +82,7 @@ For each changed file or new file, analyze for:
 
 ## Output Format
 
-Save a new file to `.agent-module/code-reviews/[appropriate-name].md`
+Save a new file to `.agents/code-reviews/[appropriate-name].md`
 
 **Stats:**
 

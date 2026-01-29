@@ -30,7 +30,7 @@ When the user informally mentions a command name (for example "prime", "plan fea
 
 - Default to concise explanations; for non-trivial or multi-file work, briefly outline a numbered plan before executing changes.
 - When requirements are ambiguous, ask at most 1–2 targeted clarification questions and clearly state any assumptions before proceeding.
-- For substantial features or refactors, consult project docs (for example `docs/`, `.agent-module/`, and `.github/` files) before deciding on an approach.
+- For substantial features or refactors, consult project docs (for example `docs/`, `.agents/`, and `.github/` files) before deciding on an approach.
 - After code changes, recommend or run appropriate tests (unit, integration, or smoke) when feasible, and state exactly what was run and the outcome.
 - Avoid schema, migration, or production-impacting changes (databases, secrets, billing, auth) unless the user explicitly requests them.
 - Prefer small, focused changes aligned with the current request; avoid unrelated refactors unless the user approves.
