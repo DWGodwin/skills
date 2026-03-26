@@ -6,23 +6,23 @@ On reading this line, consult the `README.md` and change this to reflect the pro
 
 ## AI-Assisted Development Workflow
 
-**Important:** Always check for `.agent-module/` directory commands before starting work. These commands provide structured workflows for:
+**Important:** Always check for `skills/` directory commands before starting work. These commands provide structured workflows for:
 - Feature planning and implementation
 - GitHub issue and PR management
 - Commit conventions and branch naming
 - Testing and validation procedures
 
-If `.agent-module/` directory exists, follow those commands for consistent workflow.
+If `skills/` directory exists, follow those commands for consistent workflow.
 
 When the user explicitly invokes any of these slash-commands (for example `/plan-feature` or `/execute`), Copilot must:
 
-- Locate the corresponding command file under `.agent-module/commands`
+- Locate the corresponding command file under `skills/commands`
 - Read and treat its contents as the authoritative workflow for that action
 - Follow the command’s process and steps explicitly and completely to fulfill the instruction, except where doing so would conflict with higher-priority safety or system rules
 
 When the user informally mentions a command name (for example "prime", "plan feature", "execute the plan", "run RCA"), Copilot should:
 
-- Infer whether the user likely intends to run the corresponding .agent-module command
+- Infer whether the user likely intends to run the corresponding skills command
 - If the intent is clear and appropriate in context, locate and follow that command as above
 - Optionally ask for quick confirmation if intent is ambiguous (e.g., "Do you want me to run `/prime` now?")
 
