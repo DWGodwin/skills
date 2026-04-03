@@ -8,6 +8,7 @@ Concrete features should be clear-cut and achievable in one session. "Add a butt
 
 ## Workflow
 
+**Legend:** 🔴 Opus — 🔵 Sonnet — 🟡 User action
 ```mermaid
 graph TD
     Z["Design a concrete feature"] --> A["/prime"]
@@ -38,7 +39,6 @@ graph TD
     style K fill:#4a9eff,color:#fff
 ```
 
-**Legend:** 🔴 Opus — 🔵 Sonnet — 🟡 User action
 
 ### Why rewind and clear?
 
