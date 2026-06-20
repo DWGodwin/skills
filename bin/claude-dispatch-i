@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# claude-dispatch-i — like claude-dispatch, but keeps YOU in the loop at every stage.
+#
+#   claude-dispatch-i [-p <paired-repo>] <repo-name-or-path> <issue-number> [approach-suffix]
+#
+# Identical bootstrap to claude-dispatch (worktree + tmux session + gh issue lookup),
+# but launches the INTERACTIVE supervisor skill `/dispatch-interactive`, which stops
+# after the plan, after the diff, and after validation to take your go/edit/redo —
+# instead of gating only on failure and otherwise running unattended.
+#
+# Examples:
+#   claude-dispatch-i gelos-lc 26              # worktree issue-26
+#   claude-dispatch-i gelos-lc 26 approachB    # worktree issue-26-approachB  (manual fan-out)
+#   claude-dispatch-i /mnt/workspace/Denys/solar 14
+#   claude-dispatch-i -p gelos-lc gelos 63     # also creates issue-63 worktree in gelos-lc
+#
+# -p <paired-repo> creates a matching named worktree in a second repo so you can
+# test cross-repo changes together (e.g. point PYTHONPATH at the gelos worktree
+# when running gelos-lc in Docker) — same as claude-dispatch.
+#
+# Same worktree/branch naming as claude-dispatch (issue-N[-suffix]) so
+# claude-dispatch-ls / claude-dispatch-clean manage these runs unchanged — they key
+# on the worktree path, not the session name. Only the tmux session PREFIX differs
+# (pair-issue-N vs disp-issue-N) so you can tell interactive from autonomous runs.
+#
+# Permissions are still bypassed: you review at STAGE boundaries (plan / diff /
+# validation), not per-edit, so per-edit prompts would only be noise. The isolated
+# worktree remains the sandbox.
+
+set -euo pipefail
+
+paired_repo=""
+while [[ "${1:-}" == -* ]]; do
+  case "$1" in
+    -p|--paired) paired_repo="${2:-}"; shift 2;;
+    *) echo "unknown option: $1" >&2; exit 1;;
+  esac
+done
+
+repo="${1:-}"; issue="${2:-}"; suffix="${3:-}"
+if [[ -z "$repo" || -z "$issue" ]]; then
+  echo "usage: claude-dispatch-i [-p <paired-repo>] <repo-name-or-path> <issue-number> [approach-suffix]" >&2
+  exit 1
+fi
+if ! [[ "$issue" =~ ^[0-9]+$ ]]; then
+  echo "issue must be a number, got: '$issue'" >&2
+  exit 1
+fi
+if [[ -n "$suffix" && ! "$suffix" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "approach-suffix may only contain letters, digits, '.', '_', '-'; got: '$suffix'" >&2
+  exit 1
+fi
+
+# Resolve <repo> to a git working directory: an explicit path, or a bare name
+# searched under DISPATCH_REPO_ROOTS.
+roots_default="$HOME/workspace"
+path=""
+if [[ -d "$repo/.git" ]]; then
+  path="$repo"
+else
+  IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
+  for r in "${roots[@]}"; do
+    if [[ -d "$r/$repo/.git" ]]; then path="$r/$repo"; break; fi
+  done
+fi
+if [[ -z "$path" ]]; then
+  echo "no git repo named '$repo' found (set DISPATCH_REPO_ROOTS or pass a full path)" >&2
+  exit 1
+fi
+
+cd "$path"
+path="$PWD"   # canonicalize to absolute — tmux's -c resolves a relative path against cwd, which we just changed
+
+# Confirm the issue exists and grab its title for a readable launch line.
+if ! title="$(gh issue view "$issue" --json title -q .title 2>/dev/null)"; then
+  echo "could not fetch issue #$issue in $(basename "$path") — is gh authed for its remote?" >&2
+  exit 1
+fi
+
+wt="issue-$issue"
+[[ -n "$suffix" ]] && wt="issue-$issue-$suffix"
+session="pair-$wt"      # readable tmux name, e.g. pair-issue-26 — distinct from autonomous disp-*
+
+# Don't clobber a run already in flight for the same worktree.
+if tmux has-session -t "$session" 2>/dev/null; then
+  echo "tmux session '$session' already exists — attach with:  tmux attach -t $session" >&2
+  exit 1
+fi
+# Also refuse if the AUTONOMOUS launcher already owns this worktree — both would
+# drive the same dir/branch. Pick one mode per worktree.
+if tmux has-session -t "disp-$wt" 2>/dev/null; then
+  echo "autonomous session 'disp-$wt' is already running for this worktree — attach to it, or use a [suffix]." >&2
+  exit 1
+fi
+
+# If a paired repo was requested, resolve and create its matching worktree now —
+# before starting the session, so a bad -p arg fails fast.
+paired_path=""
+if [[ -n "$paired_repo" ]]; then
+  if [[ -d "$paired_repo/.git" ]]; then
+    paired_path="$paired_repo"
+  else
+    IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
+    for r in "${roots[@]}"; do
+      if [[ -d "$r/$paired_repo/.git" ]]; then paired_path="$r/$paired_repo"; break; fi
+    done
+  fi
+  if [[ -z "$paired_path" ]]; then
+    echo "no git repo named '$paired_repo' found (set DISPATCH_REPO_ROOTS or pass a full path)" >&2
+    exit 1
+  fi
+  paired_path="$(cd "$paired_path" && pwd)"
+  mkdir -p "$paired_path/.claude/worktrees"
+  if git -C "$paired_path" worktree list | grep -q "/$wt "; then
+    echo "paired worktree $wt already exists in $(basename "$paired_path")" >&2
+  else
+    git -C "$paired_path" worktree add -b "$wt" "$paired_path/.claude/worktrees/$wt" \
+      || git -C "$paired_path" worktree add "$paired_path/.claude/worktrees/$wt" "$wt"
+  fi
+fi
+
+echo "▶ [interactive] $(basename "$path") #$issue → worktree $wt  (tmux: $session): $title"
+if [[ -n "$paired_path" ]]; then
+  echo "  paired: $(basename "$paired_path")  →  $paired_path/.claude/worktrees/$wt"
+  echo "  docker: PYTHONPATH=$path/.claude/worktrees/$wt:\$PYTHONPATH"
+fi
+
+# Launch: isolated worktree, cheap supervisor model, permissions bypassed. The skill
+# itself stops at each stage for your input — bypass just spares you per-edit prompts
+# inside a stage. `exec` means the session closes when Claude exits.
+cmd=$(printf 'exec claude --worktree %q --model sonnet --permission-mode bypassPermissions %q' \
+  "$wt" "/dispatch-interactive #$issue")
+tmux new-session -d -s "$session" -c "$path" "$cmd"
+
+# Attach — or switch, if we're invoked from inside an existing tmux client.
+if [[ -n "${TMUX:-}" ]]; then
+  exec tmux switch-client -t "$session"
+else
+  exec tmux attach -t "$session"
+fi

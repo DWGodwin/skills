@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# claude-dispatch-ls — list Claude dispatch worktrees and the tmux session (if any) in each.
+# Flags orphans: an idle worktree (no live session) that still holds unsaved or un-merged work.
+#
+#   claude-dispatch-ls [repo-name-or-path]
+#
+# No arg : scans the repo you're standing in (if any) plus every repo under
+#          DISPATCH_REPO_ROOTS (colon-separated, default ~/workspace).
+# Repo   : limits to one repo — bare name resolved the same way as claude-dispatch.
+#
+# Companion to `claude-dispatch` / `claude-dispatch-clean`.
+
+set -euo pipefail
+
+roots_default="$HOME/workspace"
+
+# --- resolve the set of repos to scan ---------------------------------------
+declare -A seen_repo
+repos=()
+add_repo() { local p="$1"; [[ -n "$p" && -z "${seen_repo[$p]:-}" ]] && { seen_repo[$p]=1; repos+=("$p"); }; }
+
+if [[ $# -ge 1 && -n "${1:-}" ]]; then
+  repo="$1"
+  if [[ -d "$repo/.git" ]]; then
+    add_repo "$(cd "$repo" && pwd)"
+  else
+    IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
+    found=""
+    for r in "${roots[@]}"; do [[ -d "$r/$repo/.git" ]] && { add_repo "$r/$repo"; found=1; break; }; done
+    [[ -z "$found" ]] && { echo "no git repo named '$repo' found (set DISPATCH_REPO_ROOTS or pass a full path)" >&2; exit 1; }
+  fi
+else
+  # the repo we're standing in (works even from inside a worktree)
+  top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  add_repo "$top"
+  IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
+  for r in "${roots[@]}"; do
+    [[ -d "$r" ]] || continue
+    for d in "$r"/*/; do [[ -d "${d}.git" ]] && add_repo "${d%/}"; done
+  done
+fi
+
+[[ ${#repos[@]} -eq 0 ]] && { echo "no repos to scan (cd into a repo or set DISPATCH_REPO_ROOTS)"; exit 0; }
+
+# --- map every live tmux pane that sits inside a dispatch worktree -----------
+declare -A LIVE
+if tmux ls >/dev/null 2>&1; then
+  while IFS=$'\t' read -r sess path; do
+    case "$path" in
+      */.claude/worktrees/*)
+        root="${path%%/.claude/worktrees/*}"
+        rest="${path#*/.claude/worktrees/}"; leaf="${rest%%/*}"
+        LIVE["$root/.claude/worktrees/$leaf"]+="$sess "
+        ;;
+    esac
+  done < <(tmux list-panes -a -F $'#{session_name}\t#{pane_current_path}' 2>/dev/null)
+fi
+
+base_branch() {
+  local repo="$1" b
+  for b in main master; do
+    git -C "$repo" show-ref --verify --quiet "refs/heads/$b" && { echo "$b"; return 0; }
+  done
+  return 1
+}
+
+# --- walk each repo's worktrees ---------------------------------------------
+rows=""
+dangling=""
+declare -A CHECKED
+for repo in "${repos[@]}"; do
+  name="$(basename "$repo")"
+  base="$(base_branch "$repo" 2>/dev/null || true)"
+  CHECKED=()
+  wt=""; br=""
+  emit() {
+    [[ "$wt" == */.claude/worktrees/* ]] || return 0
+    [[ -n "$br" ]] && CHECKED["$br"]=1
+    local leaf="${wt##*/.claude/worktrees/}"
+    local sessions="${LIVE[$wt]:-}"
+    local dirty ahead state
+    dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    if [[ -n "$base" ]]; then
+      ahead=$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null || echo '?')
+    else
+      ahead='?'
+    fi
+    if [[ -n "$sessions" ]]; then
+      state="live"
+      sessions="$(echo "$sessions" | tr ' ' '\n' | sort -u | paste -sd, -)"
+    elif [[ "$dirty" != 0 || ( "$ahead" != 0 && "$ahead" != '?' ) ]]; then
+      state="idle*"            # orphan with unsaved / un-merged work
+      sessions="-"
+    else
+      state="idle"             # safe to remove
+      sessions="-"
+    fi
+    rows+="$state"$'\t'"$sessions"$'\t'"$name"$'\t'"$leaf"$'\t'"${br:-(detached)}"$'\t'"$ahead"$'\t'"$dirty"$'\n'
+  }
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) wt="${line#worktree }" ;;
+      branch\ *)   br="${line#branch refs/heads/}" ;;
+      detached)    br="" ;;
+      "")          emit; wt=""; br="" ;;
+    esac
+  done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
+  emit; wt=""; br=""    # flush trailing record if no final blank line
+
+  # dispatch branches with no worktree — leftovers when a worktree was removed
+  # without deleting its branch (the common footgun).
+  while IFS= read -r b; do
+    [[ -n "$b" && -z "${CHECKED[$b]:-}" ]] || continue
+    local_ahead=0
+    [[ -n "$base" ]] && local_ahead=$(git -C "$repo" rev-list --count "$base..$b" 2>/dev/null || echo '?')
+    dangling+="$name"$'\t'"$b"$'\t'"$local_ahead"$'\n'
+  done < <(git -C "$repo" for-each-ref --format='%(refname:short)' 'refs/heads/worktree-*' 2>/dev/null)
+done
+
+if [[ -z "$rows" && -z "$dangling" ]]; then
+  echo "No dispatch worktrees or leftover branches under: ${repos[*]}"
+  exit 0
+fi
+
+if [[ -n "$rows" ]]; then
+  {
+    printf 'STATE\tSESSION\tREPO\tWORKTREE\tBRANCH\tAHEAD\tDIRTY\n'
+    printf '%s' "$rows"
+  } | column -t -s $'\t'
+  echo
+  echo "  live  = a tmux session is attached to this worktree"
+  echo "  idle  = no session, clean, 0 commits ahead — safe: claude-dispatch-clean <repo> <issue> [suffix]"
+  echo "  idle* = no session but has unsaved/un-merged work — inspect before removing"
+fi
+
+if [[ -n "$dangling" ]]; then
+  [[ -n "$rows" ]] && echo
+  echo "Leftover dispatch branches (worktree already gone):"
+  {
+    printf 'REPO\tBRANCH\tAHEAD\n'
+    printf '%s' "$dangling"
+  } | column -t -s $'\t'
+  echo
+  echo "  ahead=0 → fully merged, delete with:  git -C <repo> branch -D <branch>"
+  echo "  ahead>0 → has un-merged commits; inspect before deleting"
+fi

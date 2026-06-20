@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# claude-dispatch-clean — tear down a dispatch worktree: kill its tmux session, remove the
+# worktree, delete the branch, prune. Refuses to discard unsaved/un-merged work unless --force.
+#
+#   claude-dispatch-clean <repo-name-or-path> <issue-number> [approach-suffix] [-y] [--force]
+#
+#   -y, --yes      don't prompt for confirmation
+#   --force        also remove a worktree that has uncommitted changes or commits not on main
+#
+# Mirrors claude-dispatch's argument model: the worktree it removes is the one that launch
+# created — worktree `issue-N[-suffix]`, branch `worktree-issue-N[-suffix]`.
+
+set -euo pipefail
+
+roots_default="$HOME/workspace"
+
+repo=""; issue=""; suffix=""; assume_yes=""; force=""
+for a in "$@"; do
+  case "$a" in
+    -y|--yes)  assume_yes=1 ;;
+    --force)   force=1 ;;
+    -*)        echo "unknown flag: $a" >&2; exit 1 ;;
+    *)
+      if   [[ -z "$repo"   ]]; then repo="$a"
+      elif [[ -z "$issue"  ]]; then issue="$a"
+      elif [[ -z "$suffix" ]]; then suffix="$a"
+      else echo "too many arguments: $a" >&2; exit 1; fi
+      ;;
+  esac
+done
+
+if [[ -z "$repo" || -z "$issue" ]]; then
+  echo "usage: claude-dispatch-clean <repo-name-or-path> <issue-number> [approach-suffix] [-y] [--force]" >&2
+  exit 1
+fi
+[[ "$issue" =~ ^[0-9]+$ ]] || { echo "issue must be a number, got: '$issue'" >&2; exit 1; }
+
+# resolve <repo> to a git working dir (same logic as claude-dispatch)
+path=""
+if [[ -d "$repo/.git" ]]; then
+  path="$(cd "$repo" && pwd)"
+else
+  IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
+  for r in "${roots[@]}"; do [[ -d "$r/$repo/.git" ]] && { path="$r/$repo"; break; }; done
+fi
+[[ -n "$path" ]] || { echo "no git repo named '$repo' found (set DISPATCH_REPO_ROOTS or pass a full path)" >&2; exit 1; }
+
+wt="issue-$issue"; [[ -n "$suffix" ]] && wt="issue-$issue-$suffix"
+wtpath="$path/.claude/worktrees/$wt"
+branch="worktree-$wt"
+
+have_wt=""; [[ -d "$wtpath" ]] && have_wt=1
+have_branch=""; git -C "$path" show-ref --verify --quiet "refs/heads/$branch" && have_branch=1
+if [[ -z "$have_wt" && -z "$have_branch" ]]; then
+  echo "nothing to clean: no worktree at $wtpath and no branch $branch (try: claude-dispatch-ls $(basename "$path"))" >&2
+  exit 1
+fi
+
+base=""; for b in main master; do git -C "$path" show-ref --verify --quiet "refs/heads/$b" && { base="$b"; break; }; done
+
+# state: live sessions, dirty count, commits ahead of base. With the worktree dir
+# already gone, count ahead from the branch ref instead.
+sessions=""; dirty=0; ahead=0
+if [[ -n "$have_wt" ]]; then
+  if tmux ls >/dev/null 2>&1; then
+    while IFS=$'\t' read -r s p; do
+      case "$p" in "$wtpath"|"$wtpath"/*) sessions+="$s " ;; esac
+    done < <(tmux list-panes -a -F $'#{session_name}\t#{pane_current_path}' 2>/dev/null)
+    sessions="$(echo "$sessions" | tr ' ' '\n' | sort -u | paste -sd' ' -)"
+  fi
+  dirty=$(git -C "$wtpath" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  [[ -n "$base" ]] && ahead=$(git -C "$wtpath" rev-list --count "$base..HEAD" 2>/dev/null || echo 0)
+elif [[ -n "$have_branch" && -n "$base" ]]; then
+  ahead=$(git -C "$path" rev-list --count "$base..$branch" 2>/dev/null || echo 0)
+fi
+
+echo "About to tear down:"
+echo "  repo      $(basename "$path")"
+echo "  worktree  ${have_wt:+$wtpath}${have_wt:-(already gone) — branch-only cleanup}"
+echo "  branch    $branch$([[ -z "$have_branch" ]] && printf ' (already gone)')"
+echo "  session   ${sessions:-(none live)}"
+echo "  state     dirty=$dirty  ahead-of-${base:-?}=$ahead"
+
+if [[ ( "$dirty" != 0 || "$ahead" != 0 ) && -z "$force" ]]; then
+  echo
+  echo "Refusing: this has unsaved or un-merged work." >&2
+  echo "Inspect it first:" >&2
+  if [[ -n "$have_wt" ]]; then
+    echo "  git -C $wtpath status" >&2
+    echo "  git -C $wtpath diff" >&2
+  else
+    echo "  git -C $path log --oneline ${base:-main}..$branch" >&2
+  fi
+  echo "Then re-run with --force to discard it." >&2
+  exit 2
+fi
+
+if [[ -z "$assume_yes" ]]; then
+  printf 'Proceed? [y/N] '
+  if [[ -r /dev/tty ]]; then read -r reply </dev/tty || reply=""
+  else read -r reply || reply=""; fi
+  case "$reply" in y|Y|yes|YES) ;; *) echo "aborted."; exit 0 ;; esac
+fi
+
+# 1) kill any live tmux session sitting in the worktree
+if [[ -n "$sessions" ]]; then
+  for s in $sessions; do echo "  killing tmux session $s"; tmux kill-session -t "$s" 2>/dev/null || true; done
+fi
+# 2) remove the worktree (force discards uncommitted changes)
+if [[ -n "$have_wt" ]]; then
+  echo "  removing worktree"
+  git -C "$path" worktree remove ${force:+--force} "$wtpath"
+fi
+# 3) delete the branch
+if git -C "$path" show-ref --verify --quiet "refs/heads/$branch"; then
+  echo "  deleting branch $branch"
+  git -C "$path" branch -D "$branch" >/dev/null
+fi
+# 4) prune stale worktree admin entries
+git -C "$path" worktree prune
+
+echo "done."

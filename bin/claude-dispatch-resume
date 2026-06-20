@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# claude-dispatch-resume — recreate the tmux session for dispatch worktrees whose
+# host session died (e.g. a reboot killed the tmux server), resuming the SAVED Claude
+# conversation rather than starting a fresh /dispatch.
+#
+#   claude-dispatch-resume [repo-name-or-path] [issue [approach-suffix]]
+#
+#   claude-dispatch-resume                 # resume every orphaned dispatch worktree it can find
+#   claude-dispatch-resume gelos-lc        # only that repo's worktrees
+#   claude-dispatch-resume gelos-lc 13     # only worktree issue-13[-suffix]
+#   claude-dispatch-resume gelos 56 olmoearth-model
+#
+# tmux only ever hosted the shell — Claude Code persists each session transcript under
+# ~/.claude/projects/<encoded-worktree-path>/*.jsonl, so after a restart the conversation
+# is still resumable with `claude --resume <id>`. This script finds the latest sessionId
+# for each worktree and relaunches it under the same readable name (disp-<worktree>),
+# matching what `claude-dispatch` originally created. It DETACHES (never auto-attaches),
+# since it may revive several at once — attach with the printed `tmux attach -t` lines.
+#
+# Companion to claude-dispatch / claude-dispatch-ls / claude-dispatch-clean.
+
+set -euo pipefail
+
+roots_default="$HOME/workspace"
+projects="$HOME/.claude/projects"
+model="${DISPATCH_RESUME_MODEL:-sonnet}"
+
+repo_arg="${1:-}"; issue="${2:-}"; suffix="${3:-}"
+
+# Optional worktree-leaf filter from issue[/suffix].
+filter=""
+if [[ -n "$issue" ]]; then
+  [[ "$issue" =~ ^[0-9]+$ ]] || { echo "issue must be a number, got: '$issue'" >&2; exit 1; }
+  filter="issue-$issue"
+  [[ -n "$suffix" ]] && filter="issue-$issue-$suffix"
+fi
+
+# --- resolve the set of repos to scan (same rules as claude-dispatch-ls) -----
+declare -A seen_repo
+repos=()
+add_repo() { local p="$1"; [[ -n "$p" && -z "${seen_repo[$p]:-}" ]] || return 0; seen_repo[$p]=1; repos+=("$p"); }
+
+if [[ -n "$repo_arg" ]]; then
+  if [[ -d "$repo_arg/.git" ]]; then
+    add_repo "$(cd "$repo_arg" && pwd)"
+  else
+    IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
+    found=""
+    for r in "${roots[@]}"; do [[ -d "$r/$repo_arg/.git" ]] && { add_repo "$r/$repo_arg"; found=1; break; }; done
+    [[ -z "$found" ]] && { echo "no git repo named '$repo_arg' found (set DISPATCH_REPO_ROOTS or pass a full path)" >&2; exit 1; }
+  fi
+else
+  top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  add_repo "$top"
+  IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
+  for r in "${roots[@]}"; do
+    [[ -d "$r" ]] || continue
+    for d in "$r"/*/; do [[ -d "${d}.git" ]] && add_repo "${d%/}"; done
+  done
+fi
+[[ ${#repos[@]} -eq 0 ]] && { echo "no repos to scan (cd into a repo or set DISPATCH_REPO_ROOTS)"; exit 0; }
+
+# encoded ~/.claude/projects dir name for a worktree path: leading '-', then every '/' and '.' -> '-'
+encode_path() { printf '%s' "$1" | sed 's/[/.]/-/g'; }
+
+resumed=0; skipped=0
+for repo in "${repos[@]}"; do
+  name="$(basename "$repo")"
+  while IFS= read -r line; do
+    [[ "$line" == worktree\ * ]] || continue
+    wt="${line#worktree }"
+    [[ "$wt" == */.claude/worktrees/* ]] || continue
+    leaf="${wt##*/.claude/worktrees/}"
+    [[ -n "$filter" && "$leaf" != "$filter" ]] && continue
+
+    session="disp-$leaf"
+    if tmux has-session -t "$session" 2>/dev/null; then
+      echo "• $name/$leaf — session '$session' already live, skipping"; skipped=$((skipped+1)); continue
+    fi
+
+    enc="$projects/$(encode_path "$wt")"
+    latest=""
+    [[ -d "$enc" ]] && latest="$(ls -t "$enc"/*.jsonl 2>/dev/null | head -1 || true)"
+    if [[ -z "$latest" ]]; then
+      echo "• $name/$leaf — no saved Claude session found, skipping (run claude-dispatch to start fresh)"; skipped=$((skipped+1)); continue
+    fi
+    sid="$(basename "$latest" .jsonl)"
+
+    cmd=$(printf 'exec claude --resume %q --model %q --permission-mode bypassPermissions' "$sid" "$model")
+    tmux new-session -d -s "$session" -c "$wt" "$cmd"
+    echo "▶ $name/$leaf — resumed session ${sid%%-*}… as tmux '$session'   (attach: tmux attach -t $session)"
+    resumed=$((resumed+1))
+  done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
+done
+
+echo
+echo "resumed $resumed, skipped $skipped."
+[[ "$resumed" -gt 0 ]] && {
+  echo "Each session reloaded its conversation and is waiting at the prompt — attach and type"
+  echo "'continue' (or review state first). Interrupted subagents re-dispatch from the plan file."
+}

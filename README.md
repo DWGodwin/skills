@@ -56,4 +56,72 @@ graph TD
 | `/review-understanding` | Summarize changes, ask comprehension questions | **Sonnet** | Needs good question formulation, not deep generation |
 | `/learn-to-code` | Guided I Do / We Do / You Do coding lesson | **Sonnet** | Explanation quality matters but concepts are bounded |
 | `/code-review` | Review diffs for bugs, security, performance, pattern violations | **Sonnet** | Solid reasoning; upgrade to Opus for deep architectural review |
+| `/dispatch` | Supervise plan → execute → validate as isolated subagents for one high-confidence task | **Sonnet** (supervisor) | Orchestration only; spawns Opus subagents for the heavy stages |
+| `/dispatch-interactive` | Same supervisor loop, but pauses for your go/edit/redo at every stage | **Sonnet** (supervisor) | Human-in-the-loop variant for fuzzy work; still spawns Opus subagents |
+
+## Supervisor fast path (`/dispatch`)
+
+For **high-confidence, single-session** tasks, `/dispatch` folds the manual loop into one orchestrated run: a thin Sonnet supervisor dispatches **isolated subagents** for plan (Opus) → execute (Opus) → validate (Sonnet), each reading the skills above and handing off via files, then shows you the diff and runs `/review-understanding`. Reserve it for work you don't need to learn from — the manual loop stays the default for everything else, since subagents can't ask you questions mid-run.
+
+It is deliberately **interactive, not headless** (`claude -p`): after **2026-06-15**, programmatic usage bills from a small separate monthly credit at full API rates, while interactive worktree sessions stay on your subscription's subsidized limits.
+
+### Launcher: `bin/claude-dispatch`
+
+A skill can't create its own session, so `bin/claude-dispatch` bootstraps the worktree + tmux session that `/dispatch` runs inside:
+
+```
+claude-dispatch <repo-name-or-path> <issue-number> [approach-suffix]
+
+claude-dispatch gelos-lc 26              # worktree issue-26
+claude-dispatch gelos-lc 26 approachB    # issue-26-approachB — fan out a second attempt on the same issue
+```
+
+It resolves the issue via `gh`, then creates the tmux session itself — `tmux new-session -d -s disp-issue-N` running `claude --worktree issue-N --model sonnet --permission-mode bypassPermissions "/dispatch #N"` — and attaches (or switches, if you're already inside tmux). Naming the session `disp-<worktree>` makes it findable in `tmux attach -t` and the `Ctrl-b s` picker. Bare repo names resolve against `DISPATCH_REPO_ROOTS` (colon-separated; defaults to the local workspace); pass a full path otherwise. `-p <paired-repo>` also creates a matching `issue-N` worktree in a second repo, for testing cross-repo changes together. Inside an existing worktree session, skip the launcher and type `/dispatch #26` directly.
+
+**Install (per machine):** clone this repo to `~/.claude/skills` (so the skill's `~/.claude/skills/*/SKILL.md` references resolve), then put the launcher and its companions on your `PATH`:
+
+```
+for f in claude-dispatch claude-dispatch-i claude-dispatch-ls claude-dispatch-clean claude-dispatch-resume; do
+  ln -s ~/.claude/skills/bin/$f ~/.local/bin/$f
+done
+```
+
+### Stay in the loop: `bin/claude-dispatch-i`
+
+The human-in-the-loop twin of `claude-dispatch`. Identical bootstrap (worktree + tmux + `gh` lookup, `--model sonnet --permission-mode bypassPermissions`, same `issue-N[-suffix]` worktree/branch naming), but it launches `/dispatch-interactive`, which **stops after each stage** — scope, plan, diff, validation — for your approve / edit / redo, folding your feedback into a fresh subagent re-dispatch. Autonomous `/dispatch` gates only on failure; reach for `-i` when the work is fuzzy or you want to learn from it.
+
+```
+claude-dispatch-i <repo-name-or-path> <issue-number> [approach-suffix]
+```
+
+The only naming difference is the tmux session **prefix** — `pair-issue-N` instead of `disp-issue-N` — so you can tell interactive from autonomous runs at a glance. Because the worktree/branch names match, `claude-dispatch-ls` and `claude-dispatch-clean` manage these runs unchanged. The launcher refuses to start if either a `pair-` or a `disp-` session already owns the worktree — one mode per worktree.
+
+### List and clean up: `bin/claude-dispatch-ls` / `bin/claude-dispatch-clean`
+
+Once you fan out across several worktrees, these manage the fleet.
+
+`claude-dispatch-ls [repo]` maps every dispatch worktree to its live tmux session (if any) and flags the two footguns: an **`idle*`** worktree (no session but holds uncommitted or un-merged work) and a **dangling branch** whose worktree dir is already gone — removing a worktree dir does *not* delete its `worktree-*` branch. No arg scans the repo you're standing in plus every repo under `DISPATCH_REPO_ROOTS`.
+
+```
+claude-dispatch-ls                     # STATE / SESSION / REPO / WORKTREE / BRANCH / AHEAD / DIRTY
+claude-dispatch-clean <repo> <issue> [approach-suffix] [-y] [--force]
+```
+
+`claude-dispatch-clean` tears a run down in order — kill the session, remove the worktree, delete the branch, prune. It **refuses** to discard a worktree/branch with uncommitted or un-merged (`ahead>0`) work unless you pass `--force`, and handles the branch-only case when the dir is already gone. `-y` skips the confirm prompt.
+
+### Recover after a restart: `bin/claude-dispatch-resume`
+
+tmux only hosts the shell — a reboot (or anything that kills the tmux server) tears down your dispatch sessions. But Claude Code persists every conversation to `~/.claude/projects/<encoded-worktree-path>/*.jsonl`, so the work isn't lost: you **resume** the saved session instead of restarting `/dispatch` from scratch (which would discard the in-flight plan/execute state).
+
+`bin/claude-dispatch-resume` automates that recovery. For each dispatch worktree with no live session, it finds the latest saved `sessionId` and recreates the original `disp-<worktree>` tmux session running `claude --resume <id>` (same `--model sonnet --permission-mode bypassPermissions`, cwd set to the worktree):
+
+```
+claude-dispatch-resume [repo-name-or-path] [issue [approach-suffix]]
+
+claude-dispatch-resume                 # revive every orphaned dispatch worktree it can find
+claude-dispatch-resume gelos-lc        # only that repo's worktrees
+claude-dispatch-resume gelos-lc 13     # only worktree issue-13[-suffix]
+```
+
+It **detaches** (it may revive several at once) and prints a `tmux attach -t …` line per session. A resumed session reloads its history and waits at the prompt — attach and type `continue` to pick up where it left off. Worktrees with no saved transcript are skipped (start those fresh with `claude-dispatch`). Bare repo names and `DISPATCH_REPO_ROOTS` resolve exactly as for `claude-dispatch`.
 
