@@ -8,7 +8,8 @@
 #   --force        also remove a worktree that has uncommitted changes or commits not on main
 #
 # Mirrors claude-dispatch's argument model: the worktree it removes is the one that launch
-# created — worktree `issue-N[-suffix]`, branch `worktree-issue-N[-suffix]`.
+# created — worktree `issue-N[-suffix]`, branch `worktree-issue-N[-suffix]` (or `issue-N[-suffix]`
+# for a paired worktree made by -p; the branch actually checked out wins).
 
 set -euo pipefail
 
@@ -43,13 +44,35 @@ else
   IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
   for r in "${roots[@]}"; do [[ -d "$r/$repo/.git" ]] && { path="$r/$repo"; break; }; done
 fi
-[[ -n "$path" ]] || { echo "no git repo named '$repo' found (set DISPATCH_REPO_ROOTS or pass a full path)" >&2; exit 1; }
+# Fallback: search the persistent registry by basename — works after a restart
+# even without DISPATCH_REPO_ROOTS or a git CWD.
+if [[ -z "$path" ]]; then
+  _registry="${XDG_DATA_HOME:-$HOME/.local/share}/claude-dispatch/repos"
+  if [[ -f "$_registry" ]]; then
+    while IFS= read -r p; do
+      [[ "$(basename "$p")" == "$repo" && -d "$p/.git" ]] && { path="$p"; break; }
+    done < "$_registry"
+  fi
+fi
+[[ -n "$path" ]] || { echo "no git repo named '$repo' found (set DISPATCH_REPO_ROOTS, pass a full path, or run claude-dispatch once to register it)" >&2; exit 1; }
 
 wt="issue-$issue"; [[ -n "$suffix" ]] && wt="issue-$issue-$suffix"
 wtpath="$path/.claude/worktrees/$wt"
-branch="worktree-$wt"
 
+# The branch to delete: `claude --worktree` creates `worktree-issue-N`, but a
+# paired worktree (claude-dispatch -p) sits on branch `issue-N`. Prefer whatever
+# the worktree actually has checked out; fall back to trying both names.
 have_wt=""; [[ -d "$wtpath" ]] && have_wt=1
+branch=""
+if [[ -n "$have_wt" ]]; then
+  branch="$(git -C "$wtpath" symbolic-ref --short HEAD 2>/dev/null || true)"
+fi
+if [[ -z "$branch" ]]; then
+  for b in "worktree-$wt" "$wt"; do
+    git -C "$path" show-ref --verify --quiet "refs/heads/$b" && { branch="$b"; break; }
+  done
+  [[ -n "$branch" ]] || branch="worktree-$wt"   # nothing found — keep the canonical name for messages
+fi
 have_branch=""; git -C "$path" show-ref --verify --quiet "refs/heads/$branch" && have_branch=1
 if [[ -z "$have_wt" && -z "$have_branch" ]]; then
   echo "nothing to clean: no worktree at $wtpath and no branch $branch (try: claude-dispatch-ls $(basename "$path"))" >&2

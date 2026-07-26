@@ -56,12 +56,12 @@ graph TD
 | `/review-understanding` | Summarize changes, ask comprehension questions | **Sonnet** | Needs good question formulation, not deep generation |
 | `/learn-to-code` | Guided I Do / We Do / You Do coding lesson | **Sonnet** | Explanation quality matters but concepts are bounded |
 | `/code-review` | Review diffs for bugs, security, performance, pattern violations | **Sonnet** | Solid reasoning; upgrade to Opus for deep architectural review |
-| `/dispatch` | Supervise plan → execute → validate as isolated subagents for one high-confidence task | **Sonnet** (supervisor) | Orchestration only; spawns Opus subagents for the heavy stages |
-| `/dispatch-interactive` | Same supervisor loop, but pauses for your go/edit/redo at every stage | **Sonnet** (supervisor) | Human-in-the-loop variant for fuzzy work; still spawns Opus subagents |
+| `/dispatch` | Supervise plan → execute → validate as isolated subagents for one high-confidence task | **Sonnet** (supervisor) | Orchestration only; spawns Fable subagents (Opus fallback) for the heavy stages |
+| `/dispatch-interactive` | Same supervisor loop, but pauses for your go/edit/redo at every stage | **Sonnet** (supervisor) | Human-in-the-loop variant for fuzzy work; still spawns Fable subagents (Opus fallback) |
 
 ## Supervisor fast path (`/dispatch`)
 
-For **high-confidence, single-session** tasks, `/dispatch` folds the manual loop into one orchestrated run: a thin Sonnet supervisor dispatches **isolated subagents** for plan (Opus) → execute (Opus) → validate (Sonnet), each reading the skills above and handing off via files, then shows you the diff and runs `/review-understanding`. Reserve it for work you don't need to learn from — the manual loop stays the default for everything else, since subagents can't ask you questions mid-run.
+For **high-confidence, single-session** tasks, `/dispatch` folds the manual loop into one orchestrated run: a thin Sonnet supervisor dispatches **isolated subagents** for plan (Fable, Opus fallback) → execute (Fable, Opus fallback) → validate (Sonnet), each reading the skills above and handing off via files, then shows you the diff and runs `/review-understanding`. Reserve it for work you don't need to learn from — the manual loop stays the default for everything else, since subagents can't ask you questions mid-run.
 
 It is deliberately **interactive, not headless** (`claude -p`): after **2026-06-15**, programmatic usage bills from a small separate monthly credit at full API rates, while interactive worktree sessions stay on your subscription's subsidized limits.
 
@@ -78,13 +78,7 @@ claude-dispatch gelos-lc 26 approachB    # issue-26-approachB — fan out a seco
 
 It resolves the issue via `gh`, then creates the tmux session itself — `tmux new-session -d -s disp-issue-N` running `claude --worktree issue-N --model sonnet --permission-mode bypassPermissions "/dispatch #N"` — and attaches (or switches, if you're already inside tmux). Naming the session `disp-<worktree>` makes it findable in `tmux attach -t` and the `Ctrl-b s` picker. Bare repo names resolve against `DISPATCH_REPO_ROOTS` (colon-separated; defaults to the local workspace); pass a full path otherwise. `-p <paired-repo>` also creates a matching `issue-N` worktree in a second repo, for testing cross-repo changes together. Inside an existing worktree session, skip the launcher and type `/dispatch #26` directly.
 
-**Install (per machine):** clone this repo to `~/.claude/skills` (so the skill's `~/.claude/skills/*/SKILL.md` references resolve), then put the launcher and its companions on your `PATH`:
-
-```
-for f in claude-dispatch claude-dispatch-i claude-dispatch-ls claude-dispatch-clean claude-dispatch-resume; do
-  ln -s ~/.claude/skills/bin/$f ~/.local/bin/$f
-done
-```
+**Install:** see [Installing on a new machine](#installing-on-a-new-machine) below.
 
 ### Stay in the loop: `bin/claude-dispatch-i`
 
@@ -100,14 +94,14 @@ The only naming difference is the tmux session **prefix** — `pair-issue-N` ins
 
 Once you fan out across several worktrees, these manage the fleet.
 
-`claude-dispatch-ls [repo]` maps every dispatch worktree to its live tmux session (if any) and flags the two footguns: an **`idle*`** worktree (no session but holds uncommitted or un-merged work) and a **dangling branch** whose worktree dir is already gone — removing a worktree dir does *not* delete its `worktree-*` branch. No arg scans the repo you're standing in plus every repo under `DISPATCH_REPO_ROOTS`.
+`claude-dispatch-ls [repo]` maps every dispatch worktree to its live tmux session (if any) and flags the two footguns: an **`idle*`** worktree (no session but holds uncommitted or un-merged work) and a **dangling branch** whose worktree dir is already gone — removing a worktree dir does *not* delete its `worktree-*` branch. No arg scans the repo you're standing in, every repo under `DISPATCH_REPO_ROOTS`, and every repo the launchers have recorded in the registry at `~/.local/share/claude-dispatch/repos` — so past dispatch repos stay discoverable after a reboot even with no env var set.
 
 ```
 claude-dispatch-ls                     # STATE / SESSION / REPO / WORKTREE / BRANCH / AHEAD / DIRTY
 claude-dispatch-clean <repo> <issue> [approach-suffix] [-y] [--force]
 ```
 
-`claude-dispatch-clean` tears a run down in order — kill the session, remove the worktree, delete the branch, prune. It **refuses** to discard a worktree/branch with uncommitted or un-merged (`ahead>0`) work unless you pass `--force`, and handles the branch-only case when the dir is already gone. `-y` skips the confirm prompt.
+`claude-dispatch-clean` tears a run down in order — kill the session, remove the worktree, delete the branch, prune. It **refuses** to discard a worktree/branch with uncommitted or un-merged (`ahead>0`) work unless you pass `--force`, and handles the branch-only case when the dir is already gone. `-y` skips the confirm prompt. A paired worktree made with `-p` is a separate run to clean: `claude-dispatch-clean <paired-repo> <issue>` (it deletes whatever branch the worktree has checked out, so the paired repo's `issue-N` branch is handled too).
 
 ### Recover after a restart: `bin/claude-dispatch-resume`
 
@@ -123,5 +117,51 @@ claude-dispatch-resume gelos-lc        # only that repo's worktrees
 claude-dispatch-resume gelos-lc 13     # only worktree issue-13[-suffix]
 ```
 
-It **detaches** (it may revive several at once) and prints a `tmux attach -t …` line per session. A resumed session reloads its history and waits at the prompt — attach and type `continue` to pick up where it left off. Worktrees with no saved transcript are skipped (start those fresh with `claude-dispatch`). Bare repo names and `DISPATCH_REPO_ROOTS` resolve exactly as for `claude-dispatch`.
+It **detaches** (it may revive several at once) and prints a `tmux attach -t …` line per session. A resumed session reloads its history and waits at the prompt — attach and type `continue` to pick up where it left off. Worktrees with no saved transcript are skipped (start those fresh with `claude-dispatch`), as are worktrees that already have a live `disp-` or `pair-` session. Bare repo names resolve as for `claude-dispatch`, and with no repo argument it also sweeps every repo in the `~/.local/share/claude-dispatch/repos` registry — the usual case after a reboot. `DISPATCH_RESUME_MODEL` overrides the model it relaunches with (default `sonnet`).
+
+## Installing on a new machine
+
+Everything the workflow needs lives in this repo; setup is a clone plus a few symlinks.
+
+**1. Prerequisites**
+
+- [Claude Code](https://claude.com/claude-code) CLI, logged in (`claude` on your `PATH`)
+- `git`, `tmux`, and the GitHub CLI `gh` — run `gh auth login` for the account that can read your repos' issues
+- `column` (usually preinstalled; package `util-linux` or `bsdmainutils`)
+
+**2. Clone to `~/.claude/skills`.** This exact path matters twice: Claude Code auto-discovers each `*/SKILL.md` there as a user-level slash command, and the dispatch skills reference their stage skills by literal `~/.claude/skills/...` paths.
+
+```
+git clone https://github.com/DWGodwin/skills.git ~/.claude/skills
+```
+
+If `~/.claude/skills` already exists with skills you want to keep, move it aside first and merge afterwards.
+
+**3. Put the launchers on your `PATH`:**
+
+```
+mkdir -p ~/.local/bin
+for f in claude-dispatch claude-dispatch-i claude-dispatch-ls claude-dispatch-clean claude-dispatch-resume; do
+  ln -s ~/.claude/skills/bin/$f ~/.local/bin/$f
+done
+```
+
+Confirm `~/.local/bin` is on your `PATH` (most distros add it via `.profile` when the dir exists — re-login if you just created it).
+
+**4. Point the tools at your repos** (optional). In your shell profile:
+
+```
+export DISPATCH_REPO_ROOTS="/path/to/workspace:/another/root"   # default: ~/workspace
+```
+
+Bare repo names (`claude-dispatch myrepo 12`) resolve against the directory you run from, the enclosing repo's parent, then these roots. Every launch also records its repo path in `~/.local/share/claude-dispatch/repos`, so `ls`/`clean`/`resume` keep finding your repos after a reboot even without this variable.
+
+**5. Smoke test:**
+
+```
+claude-dispatch-ls           # prints "No dispatch worktrees..." — an error means PATH/deps aren't right
+claude-dispatch <repo> <N>   # any repo with a GitHub remote and an open issue N
+```
+
+The only per-repo requirement is a GitHub remote `gh` can see (for the issue lookup). Worktrees are created under `<repo>/.claude/worktrees/`, which Claude Code manages.
 

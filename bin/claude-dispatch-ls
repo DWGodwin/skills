@@ -17,7 +17,7 @@ roots_default="$HOME/workspace"
 # --- resolve the set of repos to scan ---------------------------------------
 declare -A seen_repo
 repos=()
-add_repo() { local p="$1"; [[ -n "$p" && -z "${seen_repo[$p]:-}" ]] && { seen_repo[$p]=1; repos+=("$p"); }; }
+add_repo() { local p="$1"; [[ -n "$p" && -z "${seen_repo[$p]:-}" ]] && { seen_repo[$p]=1; repos+=("$p"); }; return 0; }
 
 if [[ $# -ge 1 && -n "${1:-}" ]]; then
   repo="$1"
@@ -30,8 +30,9 @@ if [[ $# -ge 1 && -n "${1:-}" ]]; then
     [[ -z "$found" ]] && { echo "no git repo named '$repo' found (set DISPATCH_REPO_ROOTS or pass a full path)" >&2; exit 1; }
   fi
 else
-  # the repo we're standing in (works even from inside a worktree)
+  # the repo we're standing in — if inside a worktree, resolve to the main repo root
   top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ "$top" == */.claude/worktrees/* ]] && top="${top%%/.claude/worktrees/*}"
   add_repo "$top"
   IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
   for r in "${roots[@]}"; do
@@ -40,7 +41,16 @@ else
   done
 fi
 
-[[ ${#repos[@]} -eq 0 ]] && { echo "no repos to scan (cd into a repo or set DISPATCH_REPO_ROOTS)"; exit 0; }
+# Also read the persistent registry written by claude-dispatch / claude-dispatch-i so that
+# repos are discoverable after a restart even without DISPATCH_REPO_ROOTS or a git CWD.
+_registry="${XDG_DATA_HOME:-$HOME/.local/share}/claude-dispatch/repos"
+if [[ -f "$_registry" ]]; then
+  while IFS= read -r p; do
+    [[ -n "$p" && -d "$p/.git" ]] && add_repo "$p"
+  done < "$_registry"
+fi
+
+[[ ${#repos[@]} -eq 0 ]] && { echo "no repos to scan (cd into a repo, set DISPATCH_REPO_ROOTS, or run claude-dispatch once to register a repo)"; exit 0; }
 
 # --- map every live tmux pane that sits inside a dispatch worktree -----------
 declare -A LIVE
@@ -75,11 +85,12 @@ for repo in "${repos[@]}"; do
   wt=""; br=""
   emit() {
     [[ "$wt" == */.claude/worktrees/* ]] || return 0
+    [[ -d "$wt" ]] || return 0   # skip prunable entries (dir deleted, git record stale)
     [[ -n "$br" ]] && CHECKED["$br"]=1
     local leaf="${wt##*/.claude/worktrees/}"
     local sessions="${LIVE[$wt]:-}"
     local dirty ahead state
-    dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ' || echo '0')
     if [[ -n "$base" ]]; then
       ahead=$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null || echo '?')
     else

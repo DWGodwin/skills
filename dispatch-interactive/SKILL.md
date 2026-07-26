@@ -11,7 +11,7 @@ You are the **supervisor**, not the implementer. Same loop as `/dispatch` — di
 
 The subagents are non-interactive and cannot ask questions mid-run. That is fine: **all of the user's judgement happens here, at the stage boundaries between dispatches.** Where autonomous `/dispatch` gates only on failure, you gate after *every* stage — success included — present the artifact, and thread the user's feedback into the next dispatch (or a re-dispatch of the same stage).
 
-**Run me inside a dedicated worktree session**, normally launched by `claude-dispatch-i <repo> <issue#> [suffix]`. Isolated worktree (changes can't collide), cheap supervisor model (this loop is just orchestration), permissions bypassed so a stage's subagent never blocks on a per-edit prompt — the user reviews at stage boundaries, not per edit. The heavy stages spawn on **opus** regardless of the supervisor model.
+**Run me inside a dedicated worktree session**, normally launched by `claude-dispatch-i <repo> <issue#> [suffix]`. Isolated worktree (changes can't collide), cheap supervisor model (this loop is just orchestration), permissions bypassed so a stage's subagent never blocks on a per-edit prompt — the user reviews at stage boundaries, not per edit. The heavy stages spawn on **fable** when available (falling back to **opus** if the Task tool rejects `fable`) regardless of the supervisor model.
 
 Use this variant when you want a hand on the wheel — fuzzy requirements, a plan you want to shape, or a change you want to learn from. For clear-cut high-confidence work that can run unattended, use autonomous `/dispatch` instead.
 
@@ -26,9 +26,9 @@ Restate the resolved task in 1–2 sentences with its acceptance criteria, and *
 
 Create `.agents/dispatch/{kebab-name}.md` as a progress log and append after every stage (stage, status, one-line summary, and the user's decision at that gate).
 
-## 1. Plan — subagent, model: opus
+## 1. Plan — subagent, model: fable (fallback: opus)
 
-Launch a general-purpose subagent (Task tool, `model: opus`) — paste the **full resolved task text** from step 0 (title, body, and the "Context from comments" section) so the planner needs no other context:
+Launch a general-purpose subagent (Task tool, `model: fable`; if `fable` is not an accepted model value in this session, use `model: opus`) — paste the **full resolved task text** from step 0 (title, body, and the "Context from comments" section) so the planner needs no other context:
 
 > Read and follow `~/.claude/skills/plan-feature/SKILL.md` to plan this task:
 > <resolved task text>
@@ -43,9 +43,9 @@ Launch a general-purpose subagent (Task tool, `model: opus`) — paste the **ful
 
 Do not proceed until the user approves.
 
-## 2. Execute — fresh subagent, model: opus
+## 2. Execute — fresh subagent, model: fable (fallback: opus)
 
-Only after plan approval. Launch a new general-purpose subagent (`model: opus`) — fresh context, sees only the plan file:
+Only after plan approval. Launch a new general-purpose subagent (`model: fable`, or `model: opus` if fable is not available) — fresh context, sees only the plan file:
 
 > Read and follow `~/.claude/skills/execute/SKILL.md` for the plan at `.agents/plans/{kebab-name}.md`. Read the plan and every file it references before editing. Run each task's validation command and fix before moving on. Return ONLY: files created/modified, per-task validation results, and any deviations from the plan with reasons.
 

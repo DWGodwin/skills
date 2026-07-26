@@ -9,13 +9,13 @@ user_invocable: true
 
 You are the **supervisor**, not the implementer. Your only jobs: dispatch each stage as an isolated subagent, read its returned summary, gate on success, and hand the finished diff back to the user. Do NOT plan, write code, or run tests yourself — every stage runs in its own fresh subagent context so this conversation stays a thin control loop. Each stage hands off to the next through files on disk, exactly like the manual rewind/clear loop these skills were built for.
 
-**Run me inside a dedicated worktree session.** Recommended launch:
+**Run me inside a dedicated worktree session**, normally launched by `claude-dispatch <repo> <issue#> [suffix]` (see `bin/claude-dispatch`), which creates the worktree and a named tmux session (`disp-issue-N`) running:
 
 ```
-claude -w <issue-name> --tmux --model sonnet --permission-mode bypassPermissions
+claude --worktree issue-N --model sonnet --permission-mode bypassPermissions "/dispatch #N"
 ```
 
-Isolated worktree (so changes can't collide with other work), cheap supervisor model (this loop is just orchestration), permissions bypassed so the run is unattended while you check back. The heavy stages spawn on **opus** regardless of the supervisor model — see below.
+Isolated worktree (so changes can't collide with other work), cheap supervisor model (this loop is just orchestration), permissions bypassed so the run is unattended while you check back. The heavy stages spawn on **fable** when available (falling back to **opus** if the Task tool rejects `fable`) regardless of the supervisor model — see below.
 
 This is for **high-confidence work**: a clear-cut, single-session task where you trust the loop to run without your judgement at each step. If you need to learn from the change or the requirements are fuzzy, run the manual loop instead.
 
@@ -33,9 +33,9 @@ Subagents run non-interactively and **cannot ask you questions mid-run**, so res
 
 Create `.agents/dispatch/{kebab-name}.md` as a progress log and append to it after every stage (stage, status, one-line summary). This is what the user reads when they check back on the pane.
 
-## 1. Plan — subagent, model: opus
+## 1. Plan — subagent, model: fable (fallback: opus)
 
-Launch a general-purpose subagent (Task tool, `model: opus`) with this brief — paste the **full resolved task text** from step 0 (for an issue: title, body, and the "Context from comments" section) so the planner needs no other context:
+Launch a general-purpose subagent (Task tool, `model: fable`; if `fable` is not an accepted model value in this session, use `model: opus`) with this brief — paste the **full resolved task text** from step 0 (for an issue: title, body, and the "Context from comments" section) so the planner needs no other context:
 
 > Read and follow `~/.claude/skills/plan-feature/SKILL.md` to plan this task:
 > <resolved task text>
@@ -44,9 +44,9 @@ Launch a general-purpose subagent (Task tool, `model: opus`) with this brief —
 
 Record the summary in the log. **Gate:** if the agent reports it could not produce a coherent plan (missing context, contradictory requirements), STOP and report to the user. Otherwise note the plan path so the user can peek if they check in, and continue.
 
-## 2. Execute — fresh subagent, model: opus
+## 2. Execute — fresh subagent, model: fable (fallback: opus)
 
-Launch a new general-purpose subagent (`model: opus`) — fresh context, sees only the plan file:
+Launch a new general-purpose subagent (`model: fable`, or `model: opus` if fable is not available) — fresh context, sees only the plan file:
 
 > Read and follow `~/.claude/skills/execute/SKILL.md` for the plan at `.agents/plans/{kebab-name}.md`. Read the plan and every file it references before editing. Run each task's validation command and fix before moving on. Return ONLY: files created/modified, per-task validation results, and any deviations from the plan with reasons.
 

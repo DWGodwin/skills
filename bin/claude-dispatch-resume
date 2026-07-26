@@ -47,7 +47,16 @@ if [[ -n "$repo_arg" ]]; then
     IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
     found=""
     for r in "${roots[@]}"; do [[ -d "$r/$repo_arg/.git" ]] && { add_repo "$r/$repo_arg"; found=1; break; }; done
-    [[ -z "$found" ]] && { echo "no git repo named '$repo_arg' found (set DISPATCH_REPO_ROOTS or pass a full path)" >&2; exit 1; }
+    # Fallback: search the persistent registry by basename (same as claude-dispatch-clean).
+    if [[ -z "$found" ]]; then
+      _registry="${XDG_DATA_HOME:-$HOME/.local/share}/claude-dispatch/repos"
+      if [[ -f "$_registry" ]]; then
+        while IFS= read -r p; do
+          [[ "$(basename "$p")" == "$repo_arg" && -d "$p/.git" ]] && { add_repo "$p"; found=1; break; }
+        done < "$_registry"
+      fi
+    fi
+    [[ -z "$found" ]] && { echo "no git repo named '$repo_arg' found (set DISPATCH_REPO_ROOTS, pass a full path, or run claude-dispatch once to register it)" >&2; exit 1; }
   fi
 else
   top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -58,7 +67,17 @@ else
     for d in "$r"/*/; do [[ -d "${d}.git" ]] && add_repo "${d%/}"; done
   done
 fi
-[[ ${#repos[@]} -eq 0 ]] && { echo "no repos to scan (cd into a repo or set DISPATCH_REPO_ROOTS)"; exit 0; }
+
+# Also read the persistent registry written by claude-dispatch / claude-dispatch-i —
+# the critical path here, since after a reboot there may be no git CWD and no
+# DISPATCH_REPO_ROOTS in the environment.
+_registry="${XDG_DATA_HOME:-$HOME/.local/share}/claude-dispatch/repos"
+if [[ -z "$repo_arg" && -f "$_registry" ]]; then
+  while IFS= read -r p; do
+    [[ -n "$p" && -d "$p/.git" ]] && add_repo "$p"
+  done < "$_registry"
+fi
+[[ ${#repos[@]} -eq 0 ]] && { echo "no repos to scan (cd into a repo, set DISPATCH_REPO_ROOTS, or run claude-dispatch once to register a repo)"; exit 0; }
 
 # encoded ~/.claude/projects dir name for a worktree path: leading '-', then every '/' and '.' -> '-'
 encode_path() { printf '%s' "$1" | sed 's/[/.]/-/g'; }
@@ -76,6 +95,10 @@ for repo in "${repos[@]}"; do
     session="disp-$leaf"
     if tmux has-session -t "$session" 2>/dev/null; then
       echo "• $name/$leaf — session '$session' already live, skipping"; skipped=$((skipped+1)); continue
+    fi
+    # An interactive (pair-) session owns the same worktree — don't double-drive it.
+    if tmux has-session -t "pair-$leaf" 2>/dev/null; then
+      echo "• $name/$leaf — interactive session 'pair-$leaf' already live, skipping"; skipped=$((skipped+1)); continue
     fi
 
     enc="$projects/$(encode_path "$wt")"

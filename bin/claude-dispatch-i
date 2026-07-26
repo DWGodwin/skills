@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # claude-dispatch-i — like claude-dispatch, but keeps YOU in the loop at every stage.
 #
-#   claude-dispatch-i [-p <paired-repo>] <repo-name-or-path> <issue-number> [approach-suffix]
+#   claude-dispatch-i <repo-name-or-path> <issue-number> [approach-suffix] [-p <paired-repo>]
 #
 # Identical bootstrap to claude-dispatch (worktree + tmux session + gh issue lookup),
 # but launches the INTERACTIVE supervisor skill `/dispatch-interactive`, which stops
@@ -12,7 +12,7 @@
 #   claude-dispatch-i gelos-lc 26              # worktree issue-26
 #   claude-dispatch-i gelos-lc 26 approachB    # worktree issue-26-approachB  (manual fan-out)
 #   claude-dispatch-i /mnt/workspace/Denys/solar 14
-#   claude-dispatch-i -p gelos-lc gelos 63     # also creates issue-63 worktree in gelos-lc
+#   claude-dispatch-i gelos 63 -p gelos-lc     # also creates issue-63 worktree in gelos-lc
 #
 # -p <paired-repo> creates a matching named worktree in a second repo so you can
 # test cross-repo changes together (e.g. point PYTHONPATH at the gelos worktree
@@ -29,17 +29,26 @@
 
 set -euo pipefail
 
+# Options may appear anywhere among the positional arguments.
 paired_repo=""
-while [[ "${1:-}" == -* ]]; do
+positional=()
+while [[ $# -gt 0 ]]; do
   case "$1" in
-    -p|--paired) paired_repo="${2:-}"; shift 2;;
-    *) echo "unknown option: $1" >&2; exit 1;;
+    -p|--paired)
+      if [[ -z "${2:-}" ]]; then echo "$1 requires an argument" >&2; exit 1; fi
+      paired_repo="$2"; shift 2;;
+    -*) echo "unknown option: $1" >&2; exit 1;;
+    *) positional+=("$1"); shift;;
   esac
 done
 
-repo="${1:-}"; issue="${2:-}"; suffix="${3:-}"
+if [[ ${#positional[@]} -gt 3 ]]; then
+  echo "too many arguments: ${positional[*]}" >&2
+  exit 1
+fi
+repo="${positional[0]:-}"; issue="${positional[1]:-}"; suffix="${positional[2]:-}"
 if [[ -z "$repo" || -z "$issue" ]]; then
-  echo "usage: claude-dispatch-i [-p <paired-repo>] <repo-name-or-path> <issue-number> [approach-suffix]" >&2
+  echo "usage: claude-dispatch-i <repo-name-or-path> <issue-number> [approach-suffix] [-p <paired-repo>]" >&2
   exit 1
 fi
 if ! [[ "$issue" =~ ^[0-9]+$ ]]; then
@@ -51,25 +60,49 @@ if [[ -n "$suffix" && ! "$suffix" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 1
 fi
 
-# Resolve <repo> to a git working directory: an explicit path, or a bare name
-# searched under DISPATCH_REPO_ROOTS.
-roots_default="$HOME/workspace"
-path=""
-if [[ -d "$repo/.git" ]]; then
-  path="$repo"
-else
-  IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
+# Resolve a repo argument to an absolute git working directory: an explicit
+# path, or a bare name searched under (in order) the invocation directory, the
+# parent of the enclosing git repo (finds sibling repos when run from inside
+# one), then DISPATCH_REPO_ROOTS (colon-separated, default ~/workspace).
+resolve_repo() {
+  local name="$1" r top
+  if [[ -d "$name/.git" ]]; then
+    (cd "$name" && pwd); return 0
+  fi
+  local -a roots=("$PWD") env_roots
+  if top="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    roots+=("$(dirname "$top")")
+  fi
+  IFS=':' read -r -a env_roots <<< "${DISPATCH_REPO_ROOTS:-$HOME/workspace}"
+  roots+=("${env_roots[@]}")
   for r in "${roots[@]}"; do
-    if [[ -d "$r/$repo/.git" ]]; then path="$r/$repo"; break; fi
+    if [[ -d "$r/$name/.git" ]]; then (cd "$r/$name" && pwd); return 0; fi
   done
-fi
-if [[ -z "$path" ]]; then
-  echo "no git repo named '$repo' found (set DISPATCH_REPO_ROOTS or pass a full path)" >&2
+  return 1
+}
+
+if ! path="$(resolve_repo "$repo")"; then
+  echo "no git repo named '$repo' found (searched ., the enclosing repo's parent, and DISPATCH_REPO_ROOTS)" >&2
   exit 1
 fi
 
+# Resolve the paired repo now too — BEFORE cd'ing into the main repo, so a bare
+# name still resolves against the directory the command was run from.
+paired_path=""
+if [[ -n "$paired_repo" ]]; then
+  if ! paired_path="$(resolve_repo "$paired_repo")"; then
+    echo "no git repo named '$paired_repo' found (searched ., the enclosing repo's parent, and DISPATCH_REPO_ROOTS)" >&2
+    exit 1
+  fi
+fi
+
 cd "$path"
-path="$PWD"   # canonicalize to absolute — tmux's -c resolves a relative path against cwd, which we just changed
+
+# Persist the repo path so ls/clean can find it after a restart without needing
+# DISPATCH_REPO_ROOTS or a CWD inside a git repo.
+_registry="${XDG_DATA_HOME:-$HOME/.local/share}/claude-dispatch/repos"
+mkdir -p "$(dirname "$_registry")"
+grep -qxF "$path" "$_registry" 2>/dev/null || echo "$path" >> "$_registry"
 
 # Confirm the issue exists and grab its title for a readable launch line.
 if ! title="$(gh issue view "$issue" --json title -q .title 2>/dev/null)"; then
@@ -93,23 +126,9 @@ if tmux has-session -t "disp-$wt" 2>/dev/null; then
   exit 1
 fi
 
-# If a paired repo was requested, resolve and create its matching worktree now —
-# before starting the session, so a bad -p arg fails fast.
-paired_path=""
-if [[ -n "$paired_repo" ]]; then
-  if [[ -d "$paired_repo/.git" ]]; then
-    paired_path="$paired_repo"
-  else
-    IFS=':' read -r -a roots <<< "${DISPATCH_REPO_ROOTS:-$roots_default}"
-    for r in "${roots[@]}"; do
-      if [[ -d "$r/$paired_repo/.git" ]]; then paired_path="$r/$paired_repo"; break; fi
-    done
-  fi
-  if [[ -z "$paired_path" ]]; then
-    echo "no git repo named '$paired_repo' found (set DISPATCH_REPO_ROOTS or pass a full path)" >&2
-    exit 1
-  fi
-  paired_path="$(cd "$paired_path" && pwd)"
+# If a paired repo was requested, create its matching worktree now — before
+# starting the session, so problems fail fast. (Resolution happened up top.)
+if [[ -n "$paired_path" ]]; then
   mkdir -p "$paired_path/.claude/worktrees"
   if git -C "$paired_path" worktree list | grep -q "/$wt "; then
     echo "paired worktree $wt already exists in $(basename "$paired_path")" >&2
@@ -122,7 +141,7 @@ fi
 echo "▶ [interactive] $(basename "$path") #$issue → worktree $wt  (tmux: $session): $title"
 if [[ -n "$paired_path" ]]; then
   echo "  paired: $(basename "$paired_path")  →  $paired_path/.claude/worktrees/$wt"
-  echo "  docker: PYTHONPATH=$path/.claude/worktrees/$wt:\$PYTHONPATH"
+  echo "  docker: PYTHONPATH=$paired_path/.claude/worktrees/$wt:\$PYTHONPATH"
 fi
 
 # Launch: isolated worktree, cheap supervisor model, permissions bypassed. The skill
