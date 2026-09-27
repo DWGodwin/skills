@@ -57,7 +57,7 @@ graph TD
 | `/learn-to-code` | Guided I Do / We Do / You Do coding lesson | **Sonnet** | Explanation quality matters but concepts are bounded |
 | `/code-review` | Review diffs for bugs, security, performance, pattern violations | **Sonnet** | Solid reasoning; upgrade to Opus for deep architectural review |
 | `/dispatch` | Supervise plan → execute → validate as isolated subagents for one high-confidence task | **Sonnet** (supervisor) | Orchestration only; spawns Fable subagents (Opus fallback) for the heavy stages |
-| `/dispatch-interactive` | Same supervisor loop, but pauses for your go/edit/redo at every stage | **Sonnet** (supervisor) | Human-in-the-loop variant for fuzzy work; still spawns Fable subagents (Opus fallback) |
+| `/dispatch-interactive` | Same supervisor loop, but pauses for your go/edit/redo at every stage (`claude-dispatch new … -i`) | **Sonnet** (supervisor) | Human-in-the-loop variant for fuzzy work; still spawns Fable subagents (Opus fallback) |
 
 ## Supervisor fast path (`/dispatch`)
 
@@ -67,57 +67,54 @@ It is deliberately **interactive, not headless** (`claude -p`): after **2026-06-
 
 ### Launcher: `bin/claude-dispatch`
 
-A skill can't create its own session, so `bin/claude-dispatch` bootstraps the worktree + tmux session that `/dispatch` runs inside:
+A skill can't create its own worktree or window, so `bin/claude-dispatch` does the bootstrap. It fits a terminal-only workflow where [sesh](https://github.com/joshmedeski/sesh) keeps **one tmux session per repo**: each dispatch run is a **window** in that session, rooted in its own git worktree.
 
 ```
-claude-dispatch <repo-name-or-path> <issue-number> [approach-suffix]
+claude-dispatch new    <repo> <issue> [suffix] [-i]             start a run
+claude-dispatch ls     [repo]                                   list runs
+claude-dispatch resume [repo] [issue [suffix]]                  relaunch saved sessions
+claude-dispatch clean  <repo> <issue> [suffix] [-y] [--force]   tear a run down
 
-claude-dispatch gelos-lc 26              # worktree issue-26
-claude-dispatch gelos-lc 26 approachB    # issue-26-approachB — fan out a second attempt on the same issue
+claude-dispatch new glooper 26              # worktree + window issue-26
+claude-dispatch new glooper 26 approachB    # issue-26-approachB — fan out a second attempt
+claude-dispatch new glooper 26 -i           # same, but /dispatch-interactive
+claude-dispatch glooper 26                  # shorthand for `new`
 ```
 
-It resolves the issue via `gh`, then creates the tmux session itself — `tmux new-session -d -s disp-issue-N` running `claude --worktree issue-N --model sonnet --permission-mode bypassPermissions "/dispatch #N"` — and attaches (or switches, if you're already inside tmux). Naming the session `disp-<worktree>` makes it findable in `tmux attach -t` and the `Ctrl-b s` picker. Bare repo names resolve against `DISPATCH_REPO_ROOTS` (colon-separated; defaults to the local workspace); pass a full path otherwise. `-p <paired-repo>` also creates a matching `issue-N` worktree in a second repo, for testing cross-repo changes together. Inside an existing worktree session, skip the launcher and type `/dispatch #26` directly.
-
-**Install:** see [Installing on a new machine](#installing-on-a-new-machine) below.
-
-### Stay in the loop: `bin/claude-dispatch-i`
-
-The human-in-the-loop twin of `claude-dispatch`. Identical bootstrap (worktree + tmux + `gh` lookup, `--model sonnet --permission-mode bypassPermissions`, same `issue-N[-suffix]` worktree/branch naming), but it launches `/dispatch-interactive`, which **stops after each stage** — scope, plan, diff, validation — for your approve / edit / redo, folding your feedback into a fresh subagent re-dispatch. Autonomous `/dispatch` gates only on failure; reach for `-i` when the work is fuzzy or you want to learn from it.
+`new` checks the issue exists via `gh`, creates the worktree with plain `git worktree add -b issue-N <repo>/.git/wt/issue-N main`, then opens a window named `issue-N` in the repo's project session (`sesh window connect`, which also starts the session if it isn't running) and attaches or switches to it. The window runs:
 
 ```
-claude-dispatch-i <repo-name-or-path> <issue-number> [approach-suffix]
+claude --remote-control <repo>/issue-N --name issue-N --model sonnet --permission-mode bypassPermissions "/dispatch #N"
 ```
 
-The only naming difference is the tmux session **prefix** — `pair-issue-N` instead of `disp-issue-N` — so you can tell interactive from autonomous runs at a glance. Because the worktree/branch names match, `claude-dispatch-ls` and `claude-dispatch-clean` manage these runs unchanged. The launcher refuses to start if either a `pair-` or a `disp-` session already owns the worktree — one mode per worktree.
+`--remote-control` means every run shows up individually in [claude.ai/code](https://claude.ai/code) and the Claude mobile app as `<repo>/issue-N`, so you can watch or steer it away from the keyboard. `-i` launches `/dispatch-interactive` instead, which stops at every stage for your approve / edit / redo; `ls` shows the mode per window. Inside an existing worktree window, skip the launcher and type `/dispatch #26` directly.
 
-### List and clean up: `bin/claude-dispatch-ls` / `bin/claude-dispatch-clean`
+**Why worktrees under `.git/wt/`:** git owns them (no `.gitignore` entry, no `.claude/worktrees` convention to remember), and search tools skip `.git` by default so the main checkout's `rg`/`fd` never see worktree copies. The worktree's branch is simply `issue-N[-suffix]`. Because the launcher never uses `claude --worktree`, the first launch in a new worktree shows Claude's workspace-trust prompt — accept it in the window.
 
-Once you fan out across several worktrees, these manage the fleet.
+Bare repo names resolve against the directory you run from, the enclosing repo's parent, `DISPATCH_REPO_ROOTS` (colon-separated; default `~/workspace`), then a registry of repos previous runs recorded. `DISPATCH_MODEL` overrides the supervisor model (default `sonnet`). Cross-repo work is two runs: `new` in each repo.
 
-`claude-dispatch-ls [repo]` maps every dispatch worktree to its live tmux session (if any) and flags the two footguns: an **`idle*`** worktree (no session but holds uncommitted or un-merged work) and a **dangling branch** whose worktree dir is already gone — removing a worktree dir does *not* delete its `worktree-*` branch. No arg scans the repo you're standing in, every repo under `DISPATCH_REPO_ROOTS`, and every repo the launchers have recorded in the registry at `~/.local/share/claude-dispatch/repos` — so past dispatch repos stay discoverable after a reboot even with no env var set.
-
-```
-claude-dispatch-ls                     # STATE / SESSION / REPO / WORKTREE / BRANCH / AHEAD / DIRTY
-claude-dispatch-clean <repo> <issue> [approach-suffix] [-y] [--force]
-```
-
-`claude-dispatch-clean` tears a run down in order — kill the session, remove the worktree, delete the branch, prune. It **refuses** to discard a worktree/branch with uncommitted or un-merged (`ahead>0`) work unless you pass `--force`, and handles the branch-only case when the dir is already gone. `-y` skips the confirm prompt. A paired worktree made with `-p` is a separate run to clean: `claude-dispatch-clean <paired-repo> <issue>` (it deletes whatever branch the worktree has checked out, so the paired repo's `issue-N` branch is handled too).
-
-### Recover after a restart: `bin/claude-dispatch-resume`
-
-tmux only hosts the shell — a reboot (or anything that kills the tmux server) tears down your dispatch sessions. But Claude Code persists every conversation to `~/.claude/projects/<encoded-worktree-path>/*.jsonl`, so the work isn't lost: you **resume** the saved session instead of restarting `/dispatch` from scratch (which would discard the in-flight plan/execute state).
-
-`bin/claude-dispatch-resume` automates that recovery. For each dispatch worktree with no live session, it finds the latest saved `sessionId` and recreates the original `disp-<worktree>` tmux session running `claude --resume <id>` (same `--model sonnet --permission-mode bypassPermissions`, cwd set to the worktree):
+### List and clean up: `ls` / `clean`
 
 ```
-claude-dispatch-resume [repo-name-or-path] [issue [approach-suffix]]
-
-claude-dispatch-resume                 # revive every orphaned dispatch worktree it can find
-claude-dispatch-resume gelos-lc        # only that repo's worktrees
-claude-dispatch-resume gelos-lc 13     # only worktree issue-13[-suffix]
+claude-dispatch ls                     # STATE / WINDOW / MODE / REPO / WORKTREE / BRANCH / AHEAD / DIRTY
+claude-dispatch clean glooper 26 [suffix] [-y] [--force]
 ```
 
-It **detaches** (it may revive several at once) and prints a `tmux attach -t …` line per session. A resumed session reloads its history and waits at the prompt — attach and type `continue` to pick up where it left off. Worktrees with no saved transcript are skipped (start those fresh with `claude-dispatch`), as are worktrees that already have a live `disp-` or `pair-` session. Bare repo names resolve as for `claude-dispatch`, and with no repo argument it also sweeps every repo in the `~/.local/share/claude-dispatch/repos` registry — the usual case after a reboot. `DISPATCH_RESUME_MODEL` overrides the model it relaunches with (default `sonnet`).
+`ls` maps every `.git/wt/` worktree to the tmux window sitting in it (as `session:window`) and flags the footguns: **`shell`** (a window is open there but claude isn't running — typically after a reboot, see `resume`), **`idle*`** (no window, but uncommitted or un-merged work), and **leftover `issue-*` branches** whose worktree is already gone. No arg scans the repo you're standing in, every repo under `DISPATCH_REPO_ROOTS`, and the registry.
+
+`clean` kills the window, removes the worktree, deletes the branch and prunes. It **refuses** to discard uncommitted or un-merged (`ahead>0`) work unless you pass `--force`, and handles the branch-only case when the dir is already gone. `-y` skips the confirm prompt.
+
+### Recover after a restart: `resume`
+
+tmux-resurrect/continuum bring the project sessions and their windows back after a reboot, but not the `claude` process inside them. Claude Code persists every conversation to `~/.claude/projects/<encoded-worktree-path>/*.jsonl`, so nothing is lost — `resume` finds the latest saved session for each dispatch worktree and relaunches `claude --resume <id>` with the same Remote Control name and flags:
+
+```
+claude-dispatch resume                 # every dispatch worktree without a running claude
+claude-dispatch resume glooper         # only that repo
+claude-dispatch resume glooper 13      # only issue-13[-suffix]
+```
+
+If a window already sits in the worktree with a bare shell (what resurrect restores), the resume command is typed into it; otherwise a new window is opened in the background. Windows where claude is already running, or that are busy with something else, are skipped, as are worktrees with no saved transcript (start those fresh with `new`). A resumed session reloads its history and waits at the prompt — switch to the window and type `continue`.
 
 ## Installing on a new machine
 
@@ -126,7 +123,7 @@ Everything the workflow needs lives in this repo; setup is a clone plus a few sy
 **1. Prerequisites**
 
 - [Claude Code](https://claude.com/claude-code) CLI, logged in (`claude` on your `PATH`)
-- `git`, `tmux`, and the GitHub CLI `gh` — run `gh auth login` for the account that can read your repos' issues
+- `git`, `tmux`, the GitHub CLI `gh` (run `gh auth login` for the account that can read your repos' issues), and [sesh](https://github.com/joshmedeski/sesh) ≥ 2.31 for the one-session-per-repo layout (without it the launcher falls back to plain `tmux` with the same naming)
 - `column` (usually preinstalled; package `util-linux` or `bsdmainutils`)
 
 **2. Clone to `~/.claude/skills`.** This exact path matters twice: Claude Code auto-discovers each `*/SKILL.md` there as a user-level slash command, and the dispatch skills reference their stage skills by literal `~/.claude/skills/...` paths.
@@ -137,13 +134,11 @@ git clone https://github.com/DWGodwin/skills.git ~/.claude/skills
 
 If `~/.claude/skills` already exists with skills you want to keep, move it aside first and merge afterwards.
 
-**3. Put the launchers on your `PATH`:**
+**3. Put the launcher on your `PATH`:**
 
 ```
 mkdir -p ~/.local/bin
-for f in claude-dispatch claude-dispatch-i claude-dispatch-ls claude-dispatch-clean claude-dispatch-resume; do
-  ln -s ~/.claude/skills/bin/$f ~/.local/bin/$f
-done
+ln -s ~/.claude/skills/bin/claude-dispatch ~/.local/bin/claude-dispatch
 ```
 
 Confirm `~/.local/bin` is on your `PATH` (most distros add it via `.profile` when the dir exists — re-login if you just created it).
@@ -154,14 +149,14 @@ Confirm `~/.local/bin` is on your `PATH` (most distros add it via `.profile` whe
 export DISPATCH_REPO_ROOTS="/path/to/workspace:/another/root"   # default: ~/workspace
 ```
 
-Bare repo names (`claude-dispatch myrepo 12`) resolve against the directory you run from, the enclosing repo's parent, then these roots. Every launch also records its repo path in `~/.local/share/claude-dispatch/repos`, so `ls`/`clean`/`resume` keep finding your repos after a reboot even without this variable.
+Bare repo names (`claude-dispatch new myrepo 12`) resolve against the directory you run from, the enclosing repo's parent, then these roots. Every launch also records its repo path in `~/.local/share/claude-dispatch/repos`, so `ls`/`clean`/`resume` keep finding your repos after a reboot even without this variable.
 
 **5. Smoke test:**
 
 ```
-claude-dispatch-ls           # prints "No dispatch worktrees..." — an error means PATH/deps aren't right
-claude-dispatch <repo> <N>   # any repo with a GitHub remote and an open issue N
+claude-dispatch ls               # prints "No dispatch worktrees..." — an error means PATH/deps aren't right
+claude-dispatch new <repo> <N>   # any repo with a GitHub remote and an open issue N
 ```
 
-The only per-repo requirement is a GitHub remote `gh` can see (for the issue lookup). Worktrees are created under `<repo>/.claude/worktrees/`, which Claude Code manages.
+The only per-repo requirement is a GitHub remote `gh` can see (for the issue lookup). Worktrees are created under `<repo>/.git/wt/` and managed with plain `git worktree`.
 

@@ -11,7 +11,7 @@ You are the **supervisor**, not the implementer. Same loop as `/dispatch` — di
 
 The subagents are non-interactive and cannot ask questions mid-run. That is fine: **all of the user's judgement happens here, at the stage boundaries between dispatches.** Where autonomous `/dispatch` gates only on failure, you gate after *every* stage — success included — present the artifact, and thread the user's feedback into the next dispatch (or a re-dispatch of the same stage).
 
-**Run me inside a dedicated worktree session**, normally launched by `claude-dispatch-i <repo> <issue#> [suffix]`. Isolated worktree (changes can't collide), cheap supervisor model (this loop is just orchestration), permissions bypassed so a stage's subagent never blocks on a per-edit prompt — the user reviews at stage boundaries, not per edit. The heavy stages spawn on **fable** when available (falling back to **opus** if the Task tool rejects `fable`) regardless of the supervisor model.
+**Run me inside a dedicated worktree window**, normally launched by `claude-dispatch new <repo> <issue#> [suffix] -i`, which creates the worktree at `<repo>/.git/wt/issue-N` and opens a tmux window named `issue-N` in the repo's project session with Remote Control on. Isolated worktree (changes can't collide), cheap supervisor model (this loop is just orchestration), permissions bypassed so a stage's subagent never blocks on a per-edit prompt — the user reviews at stage boundaries, not per edit. The heavy stages spawn on **fable** when available (falling back to **opus** if the Task tool rejects `fable`) regardless of the supervisor model.
 
 Use this variant when you want a hand on the wheel — fuzzy requirements, a plan you want to shape, or a change you want to learn from. For clear-cut high-confidence work that can run unattended, use autonomous `/dispatch` instead.
 
@@ -79,4 +79,4 @@ Run the `~/.claude/skills/review-understanding/SKILL.md` flow yourself — confi
 - **Keep your context thin.** Subagents return summaries, not transcripts. Don't re-read their work unless a gate (or the user's feedback) requires it.
 - **One source of truth.** Stages read the existing SKILL.md files; you never reimplement their logic here.
 - **Thread feedback, don't override.** When the user asks for changes, fold their words into a fresh subagent brief rather than editing code yourself.
-- **You don't manage fan-out.** To try an alternative approach, the user opens another worktree session — `claude-dispatch-i <repo> <N> <suffix>` names them `issue-N-<suffix>` so worktrees don't collide. Comparing attempts is the user's call.
+- **You don't manage fan-out.** To try an alternative approach, the user opens another worktree window — `claude-dispatch new <repo> <N> <suffix> -i` names them `issue-N-<suffix>` so worktrees and windows don't collide. Comparing attempts is the user's call.

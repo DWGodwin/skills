@@ -9,13 +9,13 @@ user_invocable: true
 
 You are the **supervisor**, not the implementer. Your only jobs: dispatch each stage as an isolated subagent, read its returned summary, gate on success, and hand the finished diff back to the user. Do NOT plan, write code, or run tests yourself — every stage runs in its own fresh subagent context so this conversation stays a thin control loop. Each stage hands off to the next through files on disk, exactly like the manual rewind/clear loop these skills were built for.
 
-**Run me inside a dedicated worktree session**, normally launched by `claude-dispatch <repo> <issue#> [suffix]` (see `bin/claude-dispatch`), which creates the worktree and a named tmux session (`disp-issue-N`) running:
+**Run me inside a dedicated worktree window**, normally launched by `claude-dispatch new <repo> <issue#> [suffix]` (see `bin/claude-dispatch`), which creates the worktree at `<repo>/.git/wt/issue-N` on branch `issue-N` and opens a tmux window named `issue-N` in the repo's project session running:
 
 ```
-claude --worktree issue-N --model sonnet --permission-mode bypassPermissions "/dispatch #N"
+claude --remote-control <repo>/issue-N --name issue-N --model sonnet --permission-mode bypassPermissions "/dispatch #N"
 ```
 
-Isolated worktree (so changes can't collide with other work), cheap supervisor model (this loop is just orchestration), permissions bypassed so the run is unattended while you check back. The heavy stages spawn on **fable** when available (falling back to **opus** if the Task tool rejects `fable`) regardless of the supervisor model — see below.
+Isolated worktree (so changes can't collide with other work), cheap supervisor model (this loop is just orchestration), permissions bypassed so the run is unattended while you check back, and Remote Control on so the run can be watched or steered from claude.ai/code or the mobile app. The heavy stages spawn on **fable** when available (falling back to **opus** if the Task tool rejects `fable`) regardless of the supervisor model — see below.
 
 This is for **high-confidence work**: a clear-cut, single-session task where you trust the loop to run without your judgement at each step. If you need to learn from the change or the requirements are fuzzy, run the manual loop instead.
 
@@ -70,4 +70,4 @@ Record the PASS/FAIL result in the log.
 - **Sequential only.** One stage at a time; never start a stage before reading the prior stage's summary and passing its gate.
 - **Keep your context thin.** Subagents return summaries, not transcripts. Don't re-read their work unless a gate requires it.
 - **One source of truth.** Stages read the existing SKILL.md files; you never reimplement their logic here.
-- **You don't manage fan-out.** To try an alternative approach, the user opens another worktree session and runs `/dispatch` there — `claude-dispatch <repo> <N> <suffix>` names them `issue-N-<suffix>` so the worktrees don't collide. Each worktree is one independent attempt; comparing and choosing a winner is the user's call.
+- **You don't manage fan-out.** To try an alternative approach, the user opens another worktree window and runs `/dispatch` there — `claude-dispatch new <repo> <N> <suffix>` names them `issue-N-<suffix>` so the worktrees and windows don't collide. Each worktree is one independent attempt; comparing and choosing a winner is the user's call.
