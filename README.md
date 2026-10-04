@@ -56,28 +56,45 @@ graph TD
 | `/review-understanding` | Summarize changes, ask comprehension questions | **Sonnet** | Needs good question formulation, not deep generation |
 | `/learn-to-code` | Guided I Do / We Do / You Do coding lesson | **Sonnet** | Explanation quality matters but concepts are bounded |
 | `/code-review` | Review diffs for bugs, security, performance, pattern violations | **Sonnet** | Solid reasoning; upgrade to Opus for deep architectural review |
-| `/dispatch` | Supervise plan → execute → validate as isolated subagents for one high-confidence task | **Sonnet** (supervisor) | Orchestration only; spawns Fable subagents (Opus fallback) for the heavy stages |
-| `/dispatch-interactive` | Same supervisor loop, but pauses for your go/edit/redo at every stage (`claude-dispatch new … -i`) | **Sonnet** (supervisor) | Human-in-the-loop variant for fuzzy work; still spawns Fable subagents (Opus fallback) |
+| `/dispatch` | Supervise plan → execute → validate as isolated subagents for one high-confidence task | **Sonnet** (supervisor) | Orchestration only; the stages run as the `dispatch-*` agents, which pin their own model and effort |
+| `/dispatch-interactive` | Same supervisor loop, but pauses for your go/edit/redo at every stage (`claude-dispatch new … -i`) | **Sonnet** (supervisor) | Human-in-the-loop variant for fuzzy work; same stage agents |
 
 ## Supervisor fast path (`/dispatch`)
 
-For **high-confidence, single-session** tasks, `/dispatch` folds the manual loop into one orchestrated run: a thin Sonnet supervisor dispatches **isolated subagents** for plan (Fable, Opus fallback) → execute (Fable, Opus fallback) → validate (Sonnet), each reading the skills above and handing off via files, then shows you the diff and runs `/review-understanding`. Reserve it for work you don't need to learn from — the manual loop stays the default for everything else, since subagents can't ask you questions mid-run.
+For **high-confidence, single-session** tasks, `/dispatch` folds the manual loop into one orchestrated run: a thin Sonnet supervisor dispatches **isolated subagents** for plan → execute → validate, each preloading the skills above and handing off via files, then shows you the diff and runs `/review-understanding`. Reserve it for work you don't need to learn from — the manual loop stays the default for everything else, since subagents can't ask you questions mid-run.
 
 It is deliberately **interactive, not headless** (`claude -p`): after **2026-06-15**, programmatic usage bills from a small separate monthly credit at full API rates, while interactive worktree sessions stay on your subscription's subsidized limits.
+
+### Stage agents and tiers
+
+The stages are agent definitions in `agents/` (symlinked to `~/.claude/agents`), not prose in the dispatch skills. Each file's frontmatter pins the stage's **model**, **reasoning effort** and **tools**, and preloads the matching stage skill via `skills:` — so `/plan-feature`, `/execute` and `/validate` stay the single source of truth and still work in the manual loop. Effort can only be set this way: a spawn can override an agent's model, but not its effort.
+
+Every run is one of two tiers, so easy tasks don't pay for a Fable plan and a Fable execute:
+
+| Stage | **full** | **light** |
+|---|---|---|
+| Plan | `dispatch-planner` — Fable, high effort; no Edit tool | skipped |
+| Execute | `dispatch-executor` — Fable, high effort | `dispatch-executor-light` — Sonnet, medium effort; plans inline |
+| Validate | `dispatch-validator` — Sonnet, medium effort; no Edit/Write | `dispatch-validator` on Haiku |
+
+- **Choosing the tier.** `--light` / `--full` on the launcher (or in the `/dispatch` arguments) forces it; so does a `dispatch:light` / `dispatch:full` issue label. Otherwise the supervisor triages in step 0: light only when the change is confined to about 1–3 files, the "how" is obvious, the acceptance criteria are concrete, and nothing schema-, API-, dependency-, migration- or security-related is touched. Anything doubtful is full. The tier and the reason are the first lines of the run's progress log.
+- **Escalation.** A light run that hits trouble moves up instead of fix-iterating on the cheap model: if the light executor returns `ESCALATE` (the task was bigger than it looked) or light validation fails, `/dispatch` re-runs the task on the full tier once, automatically; `/dispatch-interactive` asks first.
+- **Tuning.** To change what a tier costs, edit the `model:` / `effort:` lines in `agents/*.md` — edits are picked up by running sessions within seconds. If Fable is unavailable the supervisor re-spawns the stage on Opus.
 
 ### Launcher: `bin/claude-dispatch`
 
 A skill can't create its own worktree or window, so `bin/claude-dispatch` does the bootstrap. It fits a terminal-only workflow where [sesh](https://github.com/joshmedeski/sesh) keeps **one tmux session per repo**: each dispatch run is a **window** in that session, rooted in its own git worktree.
 
 ```
-claude-dispatch new    <repo> <issue> [suffix] [-i]             start a run
-claude-dispatch ls     [repo]                                   list runs
-claude-dispatch resume [repo] [issue [suffix]]                  relaunch saved sessions
-claude-dispatch clean  <repo> <issue> [suffix] [-y] [--force]   tear a run down
+claude-dispatch new    <repo> <issue> [suffix] [-i] [--light|--full]   start a run
+claude-dispatch ls     [repo]                                          list runs
+claude-dispatch resume [repo] [issue [suffix]]                         relaunch saved sessions
+claude-dispatch clean  <repo> <issue> [suffix] [-y] [--force]          tear a run down
 
 claude-dispatch new glooper 26              # worktree + window issue-26
 claude-dispatch new glooper 26 approachB    # issue-26-approachB — fan out a second attempt
 claude-dispatch new glooper 26 -i           # same, but /dispatch-interactive
+claude-dispatch new glooper 26 --light      # force the cheap tier (--full forces plan → execute)
 claude-dispatch glooper 26                  # shorthand for `new`
 ```
 
@@ -87,7 +104,7 @@ claude-dispatch glooper 26                  # shorthand for `new`
 claude --remote-control <repo>/issue-N --name issue-N --model sonnet --permission-mode bypassPermissions "/dispatch #N"
 ```
 
-`--remote-control` means every run shows up individually in [claude.ai/code](https://claude.ai/code) and the Claude mobile app as `<repo>/issue-N`, so you can watch or steer it away from the keyboard. `-i` launches `/dispatch-interactive` instead, which stops at every stage for your approve / edit / redo; `ls` shows the mode per window. Inside an existing worktree window, skip the launcher and type `/dispatch #26` directly.
+`--remote-control` means every run shows up individually in [claude.ai/code](https://claude.ai/code) and the Claude mobile app as `<repo>/issue-N`, so you can watch or steer it away from the keyboard. `--light` / `--full` are appended to the prompt (`"/dispatch #N --light"`) to force the tier. `-i` launches `/dispatch-interactive` instead, which stops at every stage for your approve / edit / redo; `ls` shows the mode per window. Inside an existing worktree window, skip the launcher and type `/dispatch #26` directly.
 
 **Why worktrees under `.git/wt/`:** git owns them (no `.gitignore` entry, no `.claude/worktrees` convention to remember), and search tools skip `.git` by default so the main checkout's `rg`/`fd` never see worktree copies. The worktree's branch is simply `issue-N[-suffix]`. Because the launcher never uses `claude --worktree`, the first launch in a new worktree shows Claude's workspace-trust prompt — accept it in the window.
 
@@ -143,7 +160,15 @@ ln -s ~/.claude/skills/bin/claude-dispatch ~/.local/bin/claude-dispatch
 
 Confirm `~/.local/bin` is on your `PATH` (most distros add it via `.profile` when the dir exists — re-login if you just created it).
 
-**4. Point the tools at your repos** (optional). In your shell profile:
+**4. Link the stage agents.** Claude Code loads user-level agents from `~/.claude/agents`; the dispatch skills refuse to start a run without them:
+
+```
+ln -s ~/.claude/skills/agents ~/.claude/agents
+```
+
+If you already have a `~/.claude/agents` directory, link the files into it instead (`ln -s ~/.claude/skills/agents/*.md ~/.claude/agents/`). Sessions that were already running need a restart to see a newly created agents directory.
+
+**5. Point the tools at your repos** (optional). In your shell profile:
 
 ```
 export DISPATCH_REPO_ROOTS="/path/to/workspace:/another/root"   # default: ~/workspace
@@ -151,7 +176,7 @@ export DISPATCH_REPO_ROOTS="/path/to/workspace:/another/root"   # default: ~/wor
 
 Bare repo names (`claude-dispatch new myrepo 12`) resolve against the directory you run from, the enclosing repo's parent, then these roots. Every launch also records its repo path in `~/.local/share/claude-dispatch/repos`, so `ls`/`clean`/`resume` keep finding your repos after a reboot even without this variable.
 
-**5. Smoke test:**
+**6. Smoke test:**
 
 ```
 claude-dispatch ls               # prints "No dispatch worktrees..." — an error means PATH/deps aren't right

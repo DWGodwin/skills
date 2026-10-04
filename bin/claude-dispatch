@@ -2,12 +2,13 @@
 # claude-dispatch — run Claude Code's /dispatch on a GitHub issue as a tmux WINDOW inside the
 # repo's project session (the one sesh creates per repo), in a git worktree under <repo>/.git/wt/.
 #
-#   claude-dispatch new    <repo> <issue> [suffix] [-i]              start a run in window issue-N[-suffix]
+#   claude-dispatch new    <repo> <issue> [suffix] [-i] [--light|--full]   start a run in window issue-N[-suffix]
 #   claude-dispatch ls     [repo]                                    worktrees ↔ windows, flag orphans
 #   claude-dispatch resume [repo] [issue [suffix]]                   relaunch saved Claude sessions (after a reboot)
 #   claude-dispatch clean  <repo> <issue> [suffix] [-y] [--force]    kill the window, remove worktree + branch
 #
 #   claude-dispatch <repo> <issue> [suffix] [-i]   is shorthand for `new`.
+#   --light / --full force the run's tier (cheap single-stage vs. plan → execute); default: the supervisor triages.
 #
 # Model:
 #   * one tmux session per repo — named the way sesh names it (directory basename), created by
@@ -172,9 +173,9 @@ go_to() {   # attach or switch to "session:index"
   else exec tmux attach -t "${target%%:*}"; fi
 }
 
-claude_launch_cmd() {   # <repo-name> <leaf> <skill> <issue>
+claude_launch_cmd() {   # <repo-name> <leaf> <skill> <issue> [tier]
   printf 'exec claude --remote-control %q --name %q --model %q --permission-mode bypassPermissions %q' \
-    "$1/$2" "$2" "$model" "/$3 #$4"
+    "$1/$2" "$2" "$model" "/$3 #$4${5:+ --$5}"
 }
 claude_resume_cmd() {   # <repo-name> <leaf> <session-id>
   printf 'exec claude --resume %q --remote-control %q --model %q --permission-mode bypassPermissions' \
@@ -183,16 +184,18 @@ claude_resume_cmd() {   # <repo-name> <leaf> <session-id>
 
 # ================================================================ new
 cmd_new() {
-  local interactive="" positional=()
+  local interactive="" tier="" positional=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -i|--interactive) interactive=1; shift ;;
+      --light) tier=light; shift ;;
+      --full)  tier=full; shift ;;
       -h|--help) usage 0 ;;
       -*) die "unknown option for new: $1" ;;
       *) positional+=("$1"); shift ;;
     esac
   done
-  [[ ${#positional[@]} -ge 2 && ${#positional[@]} -le 3 ]] || { echo "usage: claude-dispatch new <repo> <issue> [suffix] [-i]" >&2; exit 1; }
+  [[ ${#positional[@]} -ge 2 && ${#positional[@]} -le 3 ]] || { echo "usage: claude-dispatch new <repo> <issue> [suffix] [-i] [--light|--full]" >&2; exit 1; }
   local repo="${positional[0]}" issue="${positional[1]}" suffix="${positional[2]:-}"
   check_issue "$issue"; check_suffix "$suffix"
 
@@ -228,8 +231,8 @@ cmd_new() {
     fi
   fi
 
-  local cmd; cmd="$(claude_launch_cmd "$name" "$leaf" "$skill" "$issue")"
-  echo "▶ $name #$issue${interactive:+ [interactive]} → window $leaf  (remote control: $name/$leaf): $title"
+  local cmd; cmd="$(claude_launch_cmd "$name" "$leaf" "$skill" "$issue" "$tier")"
+  echo "▶ $name #$issue${interactive:+ [interactive]}${tier:+ [$tier]} → window $leaf  (remote control: $name/$leaf): $title"
   echo "  worktree: $wt"
   local target; target="$(open_window "$path" "$wt" "$cmd")"
   [[ -n "$target" ]] || die "could not open a tmux window in $name's session"
